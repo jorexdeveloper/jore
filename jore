@@ -987,7 +987,7 @@ print_help() {
 #     Prefix message                                                           #
 ################################################################################
 animation() {
-	local frames=('   ' '.  ' '.. ' '...')
+	local frames=('🔹' '🔷' '🔵' '🔵' '🔷' '🔸' '🔶' '🟠' '🟠' '🔶')
 	local interval=0.1
 	local start=1
 
@@ -1007,7 +1007,7 @@ animation() {
 		local frame
 		while true; do
 			for frame in "${frames[@]}"; do
-				printf "${BFG3}%s${FGR}\b\b\b" "${frame}"
+				printf " ${BFG3}%s${FGR}\b\b\b" "${frame}"
 				sleep "${interval}"
 			done
 		done
