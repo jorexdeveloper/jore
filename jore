@@ -1,0 +1,2005 @@
+#!/bin/bash
+
+################################################################################
+#                                                                              #
+# Jore                                                                         #
+#                                                                              #
+# Command-line AI assistant powered by Google Gemini.                          #
+#                                                                              #
+# Copyright (C) 2025 Jore <https://github.com/jorexdeveloper>                  #
+#                                                                              #
+# This program is free software: you can redistribute it and/or modify         #
+# it under the terms of the GNU General Public License as published by         #
+# the Free Software Foundation, either version 3 of the License, or            #
+# (at your option) any later version.                                          #
+#                                                                              #
+# This program is distributed in the hope that it will be useful,              #
+# but WITHOUT ANY WARRANTY; without even the implied warranty of               #
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the                #
+# GNU General Public License for more details.                                 #
+#                                                                              #
+# You should have received a copy of the GNU General Public License            #
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.       #
+#                                                                              #
+################################################################################
+# shellcheck disable=SC2329,SC2155
+
+################################################################################
+# Initializes chat history.                                                    #
+#                                                                              #
+# Args:                                                                        #
+#     OPTIONS (see case inside)                                                #
+# Sets:                                                                        #
+#     CHAT_HISTORY - Array containing chat entries.                            #
+################################################################################
+init_history() {
+	local from=init_history
+	if [[ ${HISTORY_ENABLED} ]]; then
+		log -i "Initializing chat history."
+		local use_file=
+
+		while getopts ":f" opt; do
+			case "${opt}" in
+				f) use_file=1 ;;
+				*) ;;
+			esac
+		done
+		shift $((OPTIND - 1))
+		unset OPTIND
+
+		if [[ ${use_file} && ${HISTORY_FILE_ENABLED} && -f ${HISTORY_FILE} ]]; then
+			if [[ $(jq -r 'type' "${HISTORY_FILE}" 2>/dev/null) == array ]]; then
+				log -df "${from}" "Reading chat history from file: ${HISTORY_FILE}"
+				CHAT_HISTORY=$(jq -c '.' "${HISTORY_FILE}")
+				return
+			else
+				log -e "Failed to read chat history from file: ${HISTORY_FILE}"
+			fi
+		fi
+
+		log -df "${from}" "Creating empty chat history."
+		CHAT_HISTORY=[]
+	fi
+}
+
+################################################################################
+# Adds entries to chat history.                                                #
+#                                                                              #
+# Args:                                                                        #
+#     OPTIONS (see case inside)                                                #
+#     Arrays containing chat entries.                                          #
+# Returns:                                                                     #
+#    1 - Failed to add entries to chat history.                                #
+#    2 - Failed to write chat history to file.                                 #
+################################################################################
+add_to_history() {
+	local from=add_to_history
+	if [[ ${HISTORY_ENABLED} ]]; then
+		log -i "Adding entries to chat history."
+		local write_file=
+
+		while getopts ":w" opt; do
+			case "${opt}" in
+				w) write_file=1 ;;
+				*) ;;
+			esac
+		done
+		shift $((OPTIND - 1))
+		unset OPTIND
+
+		log -df "${from}" "Adding ${#} entries to chat history."
+		if CHAT_HISTORY=$(
+			jq \
+				-nc \
+				--argjson CHAT_HISTORY "${CHAT_HISTORY}" \
+				'[$CHAT_HISTORY[], $ARGS.positional[][]]' \
+				--jsonargs -- "${@}"
+		); then
+			if [[ ${write_file} && ${HISTORY_FILE_ENABLED} && ${HISTORY_FILE} ]]; then
+				log -df "${from}" "Writing chat history to file: ${HISTORY_FILE}"
+				if ! {
+					mkdir -p "${HISTORY_DIR}" &&
+						printf %s "${CHAT_HISTORY}" >"${HIST_TEMP_FILE}" &&
+						mv -f "${HIST_TEMP_FILE}" "${HISTORY_FILE}"
+				}; then
+					log -e "Failed to write chat history to file: ${HISTORY_FILE}"
+					return 2
+				fi
+			fi
+		else
+			log -e "Failed to add ${#} entries to chat history."
+			return 1
+		fi
+	fi
+}
+
+################################################################################
+# Creates a new chat.                                                          #
+#                                                                              #
+# Args:                                                                        #
+#     OPTIONS (see case inside)                                                #
+# Returns:                                                                     #
+#    1 - Failed to backup current chat history.                                #
+#    2 - Failed to clear history file.                                         #
+################################################################################
+create_new_chat() {
+	local from=create_new_chat
+	if [[ ${HISTORY_ENABLED} ]]; then
+		log -i "Creating new chat."
+		local write_file=
+		local backup_current=
+
+		while getopts ":wb" opt; do
+			case "${opt}" in
+				w) write_file=1 ;;
+				b) backup_current=1 ;;
+				*) ;;
+			esac
+		done
+		shift $((OPTIND - 1))
+		unset OPTIND
+
+		if [[ ${write_file} && ${HISTORY_FILE_ENABLED} && -f ${HISTORY_FILE} ]]; then
+			if [[ ${backup_current} ]]; then
+				local file="${HISTORY_DIR}"/chat-"$(date +'%Y%m%d%H%M%S')".json
+				log -df "${from}" "Backing up current history to file: ${file}"
+				if ! {
+					mkdir -p "${HISTORY_DIR}" &&
+						mv -f "${HISTORY_FILE}" "${file}"
+				}; then
+					log -e "Failed to backup current history to file: ${file}"
+					return 1
+				fi
+			fi
+
+			log -df "${from}" "Clearing chat history in file: ${HISTORY_FILE}"
+			if ! rm -f "${HISTORY_FILE}"; then
+				log -e "Failed to clear chat history in file: ${HISTORY_FILE}"
+				return 2
+			fi
+		fi
+
+		init_history
+	fi
+}
+
+################################################################################
+# Creates an array containing a chat entry.                                    #
+#                                                                              #
+# Args:                                                                        #
+#     OPTIONS (see case inside)                                                #
+#     Parts of the chat entry text.                                            #
+# Sets:                                                                        #
+#     CHAT_ENTRY - An array containing the chat entry.                         #
+# Returns:                                                                     #
+#    1 - Failed to create chat entry.                                          #
+################################################################################
+create_entry() {
+	local from=create_entry
+	log -i "Creating chat entry."
+	local role=user
+
+	while getopts ":um" opt; do
+		case "${opt}" in
+			u) role=user ;;
+			m) role=model ;;
+			*) ;;
+		esac
+	done
+	shift $((OPTIND - 1))
+	unset OPTIND
+
+	log -df "${from}" "Creating chat entry for '${role}'."
+	if ! CHAT_ENTRY=$(
+		jq \
+			-nc \
+			--arg role "${role}" \
+			'[{role: $role, parts: [{text: $ARGS.positional[]}]}]' \
+			--args -- "${@}"
+	); then
+		log -e "Failed to create chat entry for '${role}'."
+		return 1
+	fi
+}
+
+################################################################################
+# Gets a JSON array of supported API models.                                   #
+#                                                                              #
+# Sets:                                                                        #
+#     API_RESPONSE - Raw API response.                                         #
+#     API_MESSAGE  - API models/Error message.                                 #
+# Returns:                                                                     #
+#    1 - Failed to get API response.                                           #
+#    2 - Received empty API response.                                          #
+#    3 - The API returned an error.                                            #
+#    4 - Invalid API response.                                                 #
+################################################################################
+get_models() {
+	local from=get_models
+	log -i "Getting supported API models."
+
+	API_RESPONSE=
+	API_MESSAGE=
+
+	log -df "${from}" "Sending request to API."
+	trap 'trap - INT; API_MESSAGE="Failed to get API response. Please check your internet connection and try again."; return 1' INT
+
+	while true; do
+		if API_RESPONSE=$(
+			curl \
+				-s \
+				-H "x-goog-api-key: ${GEMINI_API_KEY}" \
+				"${API_URL}/${API_VERSION}/models"
+		); then
+			trap - INT
+			break
+		elif [[ ${RETRY_CONN_ERROR} ]]; then
+			continue
+		else
+			trap - INT
+			API_MESSAGE="Failed to get API response. Please check your internet connection and try again."
+			return 1
+		fi
+	done
+
+	log -df "${from}" "Processing API response."
+	if [[ ! ${API_RESPONSE} ]]; then
+		API_MESSAGE="Received empty API response."
+		return 2
+	fi
+
+	log -df "${from}" "Checking for API error."
+	local error
+	if error=$(
+		jq \
+			-nre \
+			--argjson API_RESPONSE "${API_RESPONSE}" \
+			'$API_RESPONSE.error.message // empty'
+	); then
+		log -df "${from}" "Processing API error."
+		API_MESSAGE=${error}
+		return 3
+	fi
+
+	log -df "${from}" "Extracting supported API models."
+	if ! API_MESSAGE=$(
+		jq \
+			-ne \
+			--argjson API_RESPONSE "${API_RESPONSE}" \
+			"[\$API_RESPONSE.models[] | select(.supportedGenerationMethods | contains([\"${API_METHOD}\"]))]"
+	); then
+		log -df "${from}" "Creating ERROR 4 message."
+		API_MESSAGE="Received invalid API response."
+		return 4
+	fi
+}
+
+################################################################################
+# Gets the API response for chat entries.                                      #
+#                                                                              #
+# Args:                                                                        #
+#     Arrays containing chat entries.                                          #
+# Sets:                                                                        #
+#     API_RESPONSE - Raw API response.                                         #
+#     API_MESSAGE  - API/Error message.                                        #
+# Returns:                                                                     #
+#    1 - Failed to get API response.                                           #
+#    2 - Received empty API response.                                          #
+#    3 - The API returned an error.                                            #
+#    4 - Invalid API response.                                                 #
+################################################################################
+get_response() {
+	local from=get_response
+	log -i "Getting API response for chat entries."
+
+	API_RESPONSE=
+	API_MESSAGE=
+
+	log -df "${from}" "Creating JSON payload from chat entries."
+	local json_payload=$(
+		jq \
+			-nc \
+			'{contents: [$ARGS.positional[].[]]}' \
+			--jsonargs -- "${@}"
+	)
+
+	log -df "${from}" "Sending JSON payload to API."
+	trap 'trap - INT; API_MESSAGE="Failed to get API response. Please check your internet connection and try again."; return 1' INT
+
+	while true; do
+		if API_RESPONSE=$(
+			curl \
+				-s \
+				-X POST \
+				-d "${json_payload}" \
+				-H "Content-Type: application/json" \
+				-H "x-goog-api-key: ${GEMINI_API_KEY}" \
+				"${API_URL}/${API_VERSION}/${API_MODEL}:${API_METHOD}"
+		); then
+			trap - INT
+			break
+		elif [[ ${RETRY_CONN_ERROR} ]]; then
+			continue
+		else
+			trap - INT
+			API_MESSAGE="Failed to get API response. Please check your internet connection and try again."
+			return 1
+		fi
+	done
+
+	log -df "${from}" "Processing API response."
+	if [[ ! ${API_RESPONSE} ]]; then
+		API_MESSAGE="Received empty API response."
+		return 2
+	fi
+
+	log -df "${from}" "Checking for API error."
+	local error
+	if error=$(
+		jq \
+			-nre \
+			--argjson API_RESPONSE "${API_RESPONSE}" \
+			'$API_RESPONSE.error.message // empty'
+	); then
+		log -df "${from}" "Processing API error."
+		API_MESSAGE=${error}
+		return 3
+	fi
+
+	log -df "${from}" "Extracting API text."
+	if ! API_MESSAGE=$(
+		jq \
+			-nre \
+			--argjson API_RESPONSE "${API_RESPONSE}" \
+			'$API_RESPONSE.candidates[0].content.parts[].text // empty'
+	); then
+		log -df "${from}" "Creating ERROR 4 message."
+		API_MESSAGE="Received invalid API response."
+		return 4
+	fi
+}
+
+################################################################################
+# Handles API errors.                                                          #
+################################################################################
+api_error() {
+	local from=api_error
+	log -ef API "$(
+		jq \
+			-nrj \
+			--arg API_MESSAGE "${API_MESSAGE}" \
+			--argjson API_RESPONSE "${API_RESPONSE}" \
+			'$API_RESPONSE | .error.status, " (", .error.code, ") ", .error.message'
+	)"
+}
+
+################################################################################
+# Handles invalid API responses.                                               #
+#                                                                              #
+# Returns:                                                                     #
+#    1 - Failed to save invalid API response.                                  #
+################################################################################
+invalid_response() {
+	local from=invalid_response
+	log -e "${API_MESSAGE}"
+
+	local dir="${SOURCE_DIR}"/invalid_responses
+	local file="${dir}/response-$(date +'%Y%m%d%H%M%S').json"
+	log -df "${from}" "Saving invalid API response to file: ${file}"
+	if ! {
+		mkdir -p "${dir}" &&
+			printf %s "${API_RESPONSE}" >"${file}"
+	}; then
+		log -e "Failed to save invalid API response to file: ${file}."
+		return 1
+	fi
+}
+
+################################################################################
+# Saves API response with chat entries to a file.                              #
+#                                                                              #
+# Args:                                                                        #
+#     Arrays containing chat entries.                                          #
+# Returns:                                                                     #
+#    1 - API response saving disabled.                                         #
+#    2 - Failed to save API response.                                          #
+################################################################################
+save_response() {
+	local from=save_response
+	if [[ ${SAVE_RESPONSE} ]]; then
+		log -i "Saving API response."
+		local file="${RESPONSE_DIR}/response-$(date +'%Y%m%d%H%M%S').json"
+		log -df "${from}" "Saving API response to file: ${file}"
+		if ! {
+			mkdir -p "${RESPONSE_DIR}" &&
+				jq \
+					-nc \
+					--argjson response "${API_RESPONSE}" \
+					'{contents: [$ARGS.positional[].[]], response: $response}' \
+					--jsonargs -- "${@}" \
+					>"${file}"
+		}; then
+			log -e "Failed to save API response to file: ${file}."
+			return 2
+		fi
+	else
+		return 1
+	fi
+}
+
+################################################################################
+# Prints API response.                                                         #
+#                                                                              #
+# Args:                                                                        #
+#     OPTIONS to forward to msg()                                              #
+# Extras:                                                                      #
+#     Handles JSON_RESPONSE                                                    #
+################################################################################
+print_response() {
+	local from=print_response
+	log -i "Printing API response."
+	if [[ ${JSON_RESPONSE} ]]; then
+		log -df "${from}" "Creating JSON response."
+		create_entry -m -- "${API_MESSAGE}"
+		jq \
+			-n \
+			--argjson API_MESSAGE "${CHAT_ENTRY}" \
+			'$API_MESSAGE'
+	else
+		msg -m "${@}" -- "${API_MESSAGE}" | ${PAGER} "${PAGER_ARGS[@]}"
+	fi
+}
+
+################################################################################
+# Prints API usage stats.                                                      #
+#                                                                              #
+# Args:                                                                        #
+#     OPTIONS to forward to msg()                                              #
+# Returns:                                                                     #
+#    1 - API usage stats disabled.                                             #
+################################################################################
+print_usage_stats() {
+	local from=print_usage_stats
+	if ! [[ ${RAW_OUTPUT} || ${QUIET} || ! ${API_RESPONSE} ]]; then
+		log -i "Printing API usage stats."
+		log -df "${from}" "Extracting API usage stats."
+		msg "${@}" -- "Used $(
+			jq \
+				-nr \
+				--argjson API_RESPONSE "${API_RESPONSE}" \
+				'$API_RESPONSE.usageMetadata.totalTokenCount // 0'
+		) Tokens"
+	else
+		return 1
+	fi
+}
+
+################################################################################
+# Prints chat entries.                                                         #
+#                                                                              #
+# Args:                                                                        #
+#     Arrays containing chat entries.                                          #
+# Returns:                                                                     #
+#    1 - Chat history disabled.                                                #
+# Extras:                                                                      #
+#     Handles JSON_RESPONSE                                                    #
+################################################################################
+print_chat() {
+	local from=print_chat
+	if [[ ${HISTORY_ENABLED} && ${CHAT_HISTORY} ]]; then
+		log -i "Printing chat entries."
+		log -df "${from}" "Extracting chat entries."
+		if [[ ${JSON_RESPONSE} ]]; then
+			if [[ ${*} != [] ]]; then
+				jq \
+					-n \
+					'[$ARGS.positional[][]]' \
+					--jsonargs -- "${@}"
+			fi
+		else
+			log -df "${from}" "Extracting messages from chat entries."
+			local arg indices index role message
+			for arg in "${@}"; do
+				# shellcheck disable=SC2207
+				indices=($(jq -nr --argjson arg "${arg}" '$arg | keys[]'))
+				for index in "${indices[@]}"; do
+					role=$(
+						jq \
+							-nr \
+							--argjson index "${index}" \
+							--argjson arg "${arg}" \
+							'$arg[$index].role | .[0:1]'
+					)
+					message=$(
+						jq \
+							-nr \
+							--argjson index "${index}" \
+							--argjson arg "${arg}" \
+							'$arg[$index].parts[0].text'
+					)
+
+					if [[ ${PRINT_CHAT_NO_FIRST_LINE} && ${index} -eq 0 ]]; then
+						msg -"${role}" -- "${message}"
+					else
+						msg -l"${role}" -- "${message}"
+					fi
+
+					if [[ ${CHAT_SEPARATOR} && ${role} == m ]]; then
+						msg -S
+					fi
+				done
+			done
+		fi
+	else
+		return 1
+	fi
+}
+
+################################################################################
+# Prints message header.                                                       #
+#                                                                              #
+# Args:                                                                        #
+#     OPTIONS to forward to msg()                                              #
+# Returns:                                                                     #
+#    1 - Header disabled.                                                      #
+# Extras:                                                                      #
+#     Handles RAW_INPUT                                                        #
+################################################################################
+header() {
+	local from=header
+	if ! [[ ${QUIET} || ${RAW_OUTPUT} ]]; then
+		log -df "${from}" "Printing header."
+		msg -h "${@}" "${NAME} ${VERSION} (${API_MODEL/models\//})"
+	else
+		return 1
+	fi
+}
+
+################################################################################
+# Prints message to standard output.                                           #
+#                                                                              #
+# Args:                                                                        #
+#     OPTIONS (see case inside)                                                #
+#     Message to be printed.                                                   #
+# Extras:                                                                      #
+#     Handles RAW_INPUT                                                        #
+#     Handles JSON_RESPONSE (But NOT recommended)                              #
+# BUG:                                                                         #
+#     Syntax highlighting does NOT respect split lines after fmt.              #
+################################################################################
+msg() {
+	local from=msg
+	if [[ ${RAW_OUTPUT} ]]; then
+		H_PREFIX=
+		N_PREFIX=
+		I_PREFIX=
+		F_PREFIX=
+		M_PREFIX=
+		U_PREFIX=
+		E_PREFIX=
+
+		H_PROMPT=
+		N_PROMPT=
+		I_PROMPT=
+		F_PROMPT=
+		M_PROMPT=
+		U_PROMPT=
+		E_PROMPT=
+	else
+		H_PREFIX=" "
+		N_PREFIX=" "
+		I_PREFIX=" "
+		F_PREFIX=" "
+		M_PREFIX="${BBG3} ${BGR}"
+		U_PREFIX="${BBG5} ${BGR}"
+		E_PREFIX="${BBG1} ${BGR}"
+
+		H_PROMPT=" "
+		N_PROMPT=" "
+		I_PROMPT=" "
+		F_PROMPT=" "
+		M_PROMPT=" "
+		U_PROMPT=" "
+		E_PROMPT=" "
+	fi
+
+	local role=${NAME}
+	local dtc=${FG7}
+	local text_color=${dtc}
+	local dpc=${BFG0}
+	local prompt_color=${dpc}
+	local prompt=${N_PROMPT}
+	local prefix=${N_PREFIX}
+
+	local separator_before=
+	local separator_after=
+	local empty_line_before=
+	local empty_line_after=
+	local r_before=
+	local n_after=1
+
+	while getopts ":hHiIfFmMuUeEsSlLrn" opt; do
+		case "${opt}" in
+			h)
+				# Header
+				text_color=${BFG4}
+				prompt_color=${BFG4}
+				prompt=${H_PROMPT}
+				prefix=${H_PREFIX}
+				;;
+			H)
+				# Header (no prompt)
+				text_color=${BFG4}
+				prompt_color=${BFG4}
+				prompt=${H_PROMPT}
+				prefix=${H_PREFIX}
+				;;
+			i)
+				# Info
+				text_color=${BFG0}
+				prompt_color=${BFG0}
+				prompt=${I_PROMPT}
+				prefix=${I_PREFIX}
+				;;
+			I)
+				# Info (no prompt)
+				text_color=${BFG0}
+				prompt_color=${BFG0}
+				prompt=${I_PROMPT}
+				prefix=${I_PREFIX}
+				;;
+			f)
+				# Footer
+				text_color=${dtc}
+				prompt_color=${dpc}
+				prompt=${F_PROMPT}
+				prefix=${F_PREFIX}
+				;;
+			F)
+				# Footer (no prompt)
+				text_color=${dtc}
+				prompt_color=${dpc}
+				prompt=${F_PROMPT}
+				prefix=${F_PREFIX}
+				;;
+			m)
+				# Model
+				text_color=${FG7}
+				prompt_color=${BFG3}
+				prompt=${M_PROMPT}
+				prefix=${M_PREFIX}
+				role=model
+				;;
+			M)
+				# Model (no prompt)
+				text_color=${FG7}
+				prompt_color=${BFG3}
+				prompt=${M_PROMPT}
+				prefix=${M_PREFIX}
+				role=model
+				;;
+			u)
+				# User
+				text_color=${FG7}
+				prompt_color=${BFG5}
+				prompt=${U_PROMPT}
+				prefix=${U_PREFIX}
+				role=user
+				;;
+			U)
+				# User (no prompt)
+				text_color=${FG7}
+				prompt_color=${BFG5}
+				prompt=${M_PROMPT}
+				prefix=${U_PREFIX}
+				role=user
+				;;
+			e)
+				# Error
+				text_color=${FG7}
+				prompt_color=${BFG1}
+				prompt=${E_PROMPT}
+				prefix=${E_PREFIX}
+				;;
+			E)
+				# Error (no prompt)
+				text_color=${FG7}
+				prompt_color=${BFG1}
+				prompt=${E_PROMPT}
+				prefix=${E_PREFIX}
+				;;
+			s)
+				# Print separator before
+				separator_before=1
+				;;
+			S)
+				# Print separator after
+				separator_after=1
+				;;
+			l)
+				# Print empty line before (formatted)
+				empty_line_before=1
+				;;
+			L)
+				# Print empty line after (formatted)
+				empty_line_after=1
+				;;
+			r)
+				# Print \r before
+				r_before=1
+				;;
+			n)
+				# Don't print \n after (like read -p)
+				n_after=
+				;;
+			*) ;;
+		esac
+	done
+	shift $((OPTIND - 1))
+	unset OPTIND
+
+	if [[ ${JSON_RESPONSE} ]]; then
+		if [[ ${*} ]]; then
+			if [[ "${role}" == model ]]; then
+				create_entry -m -- "${*}"
+			else
+				create_entry -u -- "${*}"
+			fi
+
+			jq \
+				-n \
+				--argjson CHAT_ENTRY "${CHAT_ENTRY}" \
+				'$CHAT_ENTRY'
+		fi
+	else
+		if [[ ${RAW_OUTPUT} && ${TERM_OUTPUT} ]]; then
+			text_color=${prompt_color}
+		fi
+
+		if [[ ${RAW_OUTPUT} ]]; then
+			size=${TERM_WIDTH}
+		else
+			size=$((TERM_WIDTH - (${#N_PREFIX} + ${#N_PROMPT})))
+		fi
+
+		print_separator() {
+			if [[ ! ${RAW_OUTPUT} ]]; then
+				local i=${size}
+				local s=
+				while [[ ${i} -gt 2 ]]; do
+					s+=—
+					((i--))
+				done
+			else
+				s=---
+			fi
+			printf "${N_PREFIX}${dpc}${N_PROMPT}${R}%s" "${s}"
+		}
+
+		if [[ ${empty_line_before} ]]; then
+			printf "${N_PREFIX}${dpc}${N_PROMPT}${R}%s\n"
+		fi
+
+		if [[ ${separator_before} ]]; then
+			print_separator
+			printf \\n
+		fi
+
+		if [[ ${r_before} ]]; then
+			printf \\r
+		fi
+
+		local line
+		local pref=${prefix}
+		if [[ ${RAW_OUTPUT} ]]; then
+			printf %s\\n "${*}" | ${HIGHLIGTER} "${HIGHLIGTER_ARGS[@]}"
+		else
+			printf %s\\n "${*}" | fmt -sw "${size}" -g "${size}" | ${HIGHLIGTER} "${HIGHLIGTER_ARGS[@]}"
+		fi | sed "s/^/‌/" |
+			while read -r line; do
+				printf "${pref}${prompt_color}${prompt}${text_color}%s${R}" "${line}"
+				prompt=${N_PROMPT}
+				pref=\\n${prefix}
+			done | sed "s/‌//"
+
+		if [[ ${separator_after} ]]; then
+			printf \\n
+			print_separator
+		fi
+
+		if [[ ${empty_line_after} ]]; then
+			printf "\n${N_PREFIX}${dpc}${N_PROMPT}${R}%s"
+		fi
+
+		if [[ ${n_after} ]]; then
+			printf \\n
+		fi
+	fi
+}
+
+################################################################################
+# Prints message footer.                                                       #
+#                                                                              #
+# Args:                                                                        #
+#     OPTIONS to forward to msg()                                              #
+# Returns:                                                                     #
+#    1 - Footer disabled.                                                      #
+################################################################################
+footer() {
+	local from=footer
+	if ! [[ ${QUIET} || ${RAW_OUTPUT} ]]; then
+		log -df "${from}" "Printing footer."
+		msg -f "${@}"
+	else
+		return 1
+	fi
+}
+
+################################################################################
+# Lists supported API models.                                                  #
+#                                                                              #
+# Returns:                                                                     #
+#    get_models() return code (See get_models()).                              #
+################################################################################
+list_models() {
+	local from=list_models
+	log -i "Listing supported API models."
+
+	get_models
+	local response_code=${?}
+	log -df "${from}" "API_RESPONSE_CODE=${response_code}"
+
+	if [[ ${response_code} -eq 0 ]]; then
+		if [[ ${JSON_RESPONSE} ]]; then
+			log -df "${from}" "Creating JSON response."
+			jq \
+				-nr \
+				--argjson API_MESSAGE "${API_MESSAGE}" \
+				'$API_MESSAGE | sort_by(.name)'
+		elif [[ ${MAIN_ACTION} == LIST_MODELS_WITH_LIST ]]; then
+			log -df "${from}" "Creating list response."
+			jq \
+				-nr \
+				--argjson API_MESSAGE "${API_MESSAGE}" \
+				'$API_MESSAGE | sort_by(.name) | .[].name | sub("models/"; "")'
+		else
+			log -df "${from}" "Creating formatted response."
+			msg "$(jq \
+				-nr \
+				--argjson API_MESSAGE "${API_MESSAGE}" \
+				'"# Supported API models" + "\n", ($API_MESSAGE | sort_by(.name) | .[] | "## " + .displayName + " (`" + (.name | sub("models/"; "")) + "`)", (.description // "No description") + "\n")')"
+		fi
+	else
+		case "${response_code}" in
+			3) api_error ;;
+			4) invalid_response ;;
+			*) log -e "${API_MESSAGE}" ;;
+		esac
+		return "${response_code}"
+	fi
+}
+
+################################################################################
+# Sets or gets the system clipboard contents.                                  #
+#                                                                              #
+# Args:                                                                        #
+#     Optional text to set to the system clipboard.                            #
+# Sets:                                                                        #
+#     CLIPBOARD - The contents of the system clipboard.                        #
+# Returns:                                                                     #
+#    1 - No clipboard commands found.                                          #
+################################################################################
+clipboard() {
+	local from=clipboard
+	if [[ ${*} ]]; then
+		log -i "Getting clipboard contents."
+	else
+		log -i "Copying contents to clipboard."
+	fi
+
+	CLIPBOARD=
+	if [[ "${DISPLAY}" ]]; then
+		if command -v xclip &>/dev/null; then
+			if [[ ${*} ]]; then
+				log -df "${from}" "Setting clipboard with xclip."
+				printf %s "${*}" | xclip -in -selection clipboard
+			else
+				log -df "${from}" "Getting clipboard with xclip."
+				CLIPBOARD=$(xclip -out -selection clipboard)
+			fi
+		elif command -v xsel &>/dev/null; then
+			if [[ ${*} ]]; then
+				log -df "${from}" "Setting clipboard with xsel."
+				printf %s "${*}" | xsel --clipboard --input
+			else
+				log -df "${from}" "Getting clipboard with xsel."
+				CLIPBOARD=$(xsel --clipboard --output)
+			fi
+		fi
+	elif command -v termux-api-start &>/dev/null; then
+		if [[ ${*} ]]; then
+			log -df "${from}" "Setting clipboard with termux-clipboard-set."
+			printf %s "${*}" | termux-clipboard-set
+		else
+			log -df "${from}" "Getting clipboard with termux-clipboard-get."
+			CLIPBOARD=$(termux-clipboard-get)
+		fi
+	else
+		return 1
+	fi
+}
+
+################################################################################
+# Prints version information.                                                  #
+################################################################################
+print_version() {
+	echo "${NAME} version ${VERSION}"
+	echo "Copyright (C) 2025 ${AUTHOR} <${GITHUB}>."
+	echo "License GPLv3+: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>."
+	echo
+	echo "This is free software, you are free to change and redistribute it."
+	echo "There is NO WARRANTY, to the extent permitted by law."
+}
+
+################################################################################
+# Prints help information.                                                     #
+################################################################################
+print_help() {
+	echo "USAGE: ${NAME} [OPTIONS] [PROMPT]"
+	echo
+	echo "Commandline AI assistant powered by Google Gemini."
+	echo
+	echo "OPTIONS"
+	echo "  -S       Save API key to file (${GEMINI_API_KEY_FILE//${HOME}/\~})."
+	echo "  -m NAME  Set API model."
+	echo "  -i       Force interactive mode (default when no PROMPT)."
+	echo "  -c       Print current chat."
+	echo "  -n       Backup current chat and create new chat."
+	echo "  -N       Like -n but doesn't backup current chat."
+	echo "  -p       Start private chat (never write chat history)."
+	echo "  -d       Disable chat history."
+	echo "  -s       Print separator betweeen chats."
+	echo "  -r       Prefer raw output (no pretty printing)."
+	echo "  -R       Disable commands (interactive mode only)."
+	echo "  -j       Prefer JSON output."
+	echo "  -q       Quiet mode (hide startup messages)."
+	echo "  -Q       Alias for -rq (raw output + quiet)."
+	echo "  -l       List supported models."
+	echo "  -L INT   Set log level (0 to 5)."
+	echo "  -x       Retry on connection error. Use Ctrl+C to stop."
+	echo "  -v       Print version information and exit."
+	echo "  -h       Print help information and exit."
+	echo
+	echo "ENVIRONMENT VARIABLES"
+	echo "  GEMINI_API_KEY - The API key to use."
+	echo
+	echo "LEARN MORE"
+	echo "  ${GITHUB}/${REPOSITORY}"
+}
+
+################################################################################
+# Starts an animation (it's a bit buggy, only run one at a time)               #
+#                                                                              #
+# Sets Global variables:                                                       #
+#    ANIM_PID                                                                  #
+# Args:                                                                        #
+#     OPTIONS (see case inside)                                                #
+#     Prefix message                                                           #
+################################################################################
+animation() {
+	local frames=('   ' '.  ' '.. ' '...')
+	local interval=0.1
+	local start=1
+
+	while getopts ":s" opt; do
+		case "${opt}" in
+			s)
+				start=
+				continue
+				;;
+			*) ;;
+		esac
+	done
+	shift $((OPTIND - 1))
+	unset OPTARG OPTIND opt
+
+	_animate() {
+		local frame
+		while true; do
+			for frame in "${frames[@]}"; do
+				printf "${BFG3}%s${FGR}\b\b\b" "${frame}"
+				sleep "${interval}"
+			done
+		done
+	}
+
+	if [[ ${start} ]]; then
+		local pid_file
+		pid_file=$(mktemp --tmpdir) && {
+			(
+				stty -echo
+				printf "\e[?25l"
+				_animate "${@}" &
+				printf "%s\n" "${!}" >"${pid_file}"
+			)
+
+			ANIM_PID=$(cat "${pid_file}")
+			rm -f "${pid_file}"
+		}
+	else
+		local ifs_old=${IFS}
+		local tty_settings=$(stty -g)
+
+		# -isig:     Disable processing of INTR, QUIT, SUSP characters (e.g., Ctrl+C, Ctrl+Z)
+		# -icanon:   Disable canonical (line-buffered) input (Input is read character by character)
+		stty -icanon -isig
+
+		# Clear terminal input
+		while IFS= read -r -n 1 -t 0.01 _; do
+			:
+		done
+
+		stty "${tty_settings}"
+		IFS=${ifs_old}
+
+		printf "\e[?25h"
+		stty echo
+
+		if [[ ${ANIM_PID} ]]; then
+			kill "${ANIM_PID}"
+			ANIM_PID=
+		fi
+	fi
+}
+
+################################################################################
+# Sets ANSI color variables.                                                   #
+################################################################################
+colors() {
+	if [[ ${COLOR_ENABLED} && ${TERM_OUTPUT} ]]; then
+		local set_normal_colors=1
+		local set_error_colors=1
+	else
+		local set_normal_colors=
+		local set_error_colors=
+	fi
+
+	while getopts ":nNeEaA" OPT; do
+		case "${OPT}" in
+			n)
+				set_normal_colors=1
+				;;
+			N)
+				set_normal_colors=
+				;;
+			e)
+				set_error_colors=1
+				;;
+			E)
+				set_error_colors=
+				;;
+			a)
+				set_normal_colors=1
+				set_error_colors=1
+				;;
+			A)
+				set_normal_colors=
+				set_error_colors=
+				;;
+			*) ;;
+		esac
+	done
+	shift $((OPTIND - 1))
+	unset OPTIND OPT
+
+	# shellcheck disable=SC2034
+	if [[ ${set_normal_colors} ]]; then
+		FG0=$'\e[30m' # grey
+		FG1=$'\e[31m' # red
+		FG2=$'\e[32m' # green
+		FG3=$'\e[33m' # yellow
+		FG4=$'\e[34m' # blue
+		FG5=$'\e[35m' # magenta
+		FG6=$'\e[36m' # cyan
+		FG7=$'\e[37m' # white
+
+		BFG0=$'\e[90m' # grey
+		BFG1=$'\e[91m' # red
+		BFG2=$'\e[92m' # green
+		BFG3=$'\e[93m' # yellow
+		BFG4=$'\e[94m' # blue
+		BFG5=$'\e[95m' # magenta
+		BFG6=$'\e[96m' # cyan
+		BFG7=$'\e[97m' # white
+
+		BG0=$'\e[40m' # grey
+		BG1=$'\e[41m' # red
+		BG2=$'\e[42m' # green
+		BG3=$'\e[43m' # yellow
+		BG4=$'\e[44m' # blue
+		BG5=$'\e[45m' # magenta
+		BG6=$'\e[46m' # cyan
+		BG7=$'\e[47m' # white
+
+		BBG0=$'\e[100m' # grey
+		BBG1=$'\e[101m' # red
+		BBG2=$'\e[102m' # green
+		BBG3=$'\e[103m' # yellow
+		BBG4=$'\e[104m' # blue
+		BBG5=$'\e[105m' # magenta
+		BBG6=$'\e[106m' # cyan
+		BBG7=$'\e[107m' # white
+
+		FGR=$'\e[39m' # reset foreground
+		BGR=$'\e[49m' # reset background
+		R=$'\e[0m'    # reset all
+
+		HIGHLIGHTER_COLOR_STATUS=always
+	else
+		FG0=
+		FG1=
+		FG2=
+		FG3=
+		FG4=
+		FG5=
+		FG6=
+		FG7=
+
+		BFG0=
+		BFG1=
+		BFG2=
+		BFG3=
+		BFG4=
+		BFG5=
+		BFG6=
+		BFG7=
+
+		BG0=
+		BG1=
+		BG2=
+		BG3=
+		BG4=
+		BG5=
+		BG6=
+		BG7=
+
+		BBG0=
+		BBG1=
+		BBG2=
+		BBG3=
+		BBG4=
+		BBG5=
+		BBG6=
+		BBG7=
+
+		FGR=
+		BGR=
+		R=
+
+		HIGHLIGHTER_COLOR_STATUS=never
+	fi
+
+	# shellcheck disable=SC2034
+	if [[ ${set_error_colors} ]]; then
+		EFG0=$'\e[30m' # grey
+		EFG1=$'\e[31m' # red
+		EFG2=$'\e[32m' # green
+		EFG3=$'\e[33m' # yellow
+		EFG4=$'\e[34m' # blue
+		EFG5=$'\e[35m' # magenta
+		EFG6=$'\e[36m' # cyan
+		EFG7=$'\e[37m' # white
+
+		EBFG0=$'\e[90m' # grey
+		EBFG1=$'\e[91m' # red
+		EBFG2=$'\e[92m' # green
+		EBFG3=$'\e[93m' # yellow
+		EBFG4=$'\e[94m' # blue
+		EBFG5=$'\e[95m' # magenta
+		EBFG6=$'\e[96m' # cyan
+		EBFG7=$'\e[97m' # white
+
+		EBG0=$'\e[40m' # grey
+		EBG1=$'\e[41m' # red
+		EBG2=$'\e[42m' # green
+		EBG3=$'\e[43m' # yellow
+		EBG4=$'\e[44m' # blue
+		EBG5=$'\e[45m' # magenta
+		EBG6=$'\e[46m' # cyan
+		EBG7=$'\e[47m' # white
+
+		EBBG0=$'\e[100m' # grey
+		EBBG1=$'\e[101m' # red
+		EBBG2=$'\e[102m' # green
+		EBBG3=$'\e[103m' # yellow
+		EBBG4=$'\e[104m' # blue
+		EBBG5=$'\e[105m' # magenta
+		EBBG6=$'\e[106m' # cyan
+		EBBG7=$'\e[107m' # white
+
+		EFGR=$'\e[39m' # reset foreground
+		EBGR=$'\e[49m' # reset background
+		ER=$'\e[0m'    # reset all
+	else
+		EFG0=
+		EFG1=
+		EFG2=
+		EFG3=
+		EFG4=
+		EFG5=
+		EFG6=
+		EFG7=
+
+		EBFG0=
+		EBFG1=
+		EBFG2=
+		EBFG3=
+		EBFG4=
+		EBFG5=
+		EBFG6=
+		EBFG7=
+
+		EBG0=
+		EBG1=
+		EBG2=
+		EBG3=
+		EBG4=
+		EBG5=
+		EBG6=
+		EBG7=
+
+		EBBG0=
+		EBBG1=
+		EBBG2=
+		EBBG3=
+		EBBG4=
+		EBBG5=
+		EBBG6=
+		EBBG7=
+
+		EFGR=
+		EBGR=
+		ER=
+	fi
+}
+
+################################################################################
+# Prints log messages.                                                         #
+# Higher log levels give more information.                                     #
+#                                                                              #
+# The 5 major log levels include:                                              #
+#     5. DEBUG                     (CYAN)                                      #
+#     4. INFO (default)            (BLUE)                                      #
+#     3. WARNING                   (YELLOW)                                    #
+#     2. ERROR                     (RED)                                       #
+#     1. CRITICAL (exits program)  (RED)                                       #
+#     0. NONE (no log messages)                                                #
+#                                                                              #
+# Special level SUCCESS (GREEN) = DEBUG                                        #
+#                                                                              #
+# Args:                                                                        #
+#     OPTIONS (see case inside)                                                #
+#     Message to be logged.                                                    #
+################################################################################
+log() {
+	local l=4
+	local p=INF
+	local c=${EBFG4}
+	local f=${NAME:-EMPTY}
+
+	while getopts ":diwecsf:" opt; do
+		case "${opt}" in
+			d)
+				l=5
+				p=DBG
+				c=${EBFG6}
+				;;
+			s)
+				l=5
+				p=SUC
+				c=${EBFG2}
+				;;
+			i)
+				l=4
+				p=INF
+				c=${EBFG4}
+				;;
+			w)
+				l=3
+				p=WRN
+				c=${EBFG3}
+				;;
+			e)
+				l=2
+				p=ERR
+				c=${EBG1}
+				;;
+			c)
+				l=1
+				p=CRT
+				c=${EBG1}
+				;;
+			f)
+				f=${OPTARG}
+				;;
+			*) ;;
+		esac
+	done
+	shift $((OPTIND - 1))
+	unset OPTIND
+
+	if [[ ${l} -le ${LOG_LEVEL} ]]; then
+		printf "${ER}[$(date +'%H:%M:%S')] [${c}${p}${ER}] from ${EBFG5}${f}${ER}: %s\n" "${*}" >&2
+	fi
+
+	if [[ ${l} -eq 1 ]]; then
+		exit 255
+	fi
+}
+
+################################################################################
+# Entry point of program.                                                      #
+################################################################################
+
+# shellcheck disable=SC2034
+if [[ -t 0 ]]; then
+	TERM_INPUT=1
+	read -r TERM_HEIGHT TERM_WIDTH < <(stty size)
+else
+	TERM_INPUT=
+	TERM_WIDTH=50
+	TERM_HEIGHT=50
+fi
+
+if [[ -t 1 ]]; then
+	TERM_OUTPUT=1
+else
+	TERM_OUTPUT=
+fi
+
+if [[ -t 2 ]]; then
+	TERM_ERROR=1
+else
+	TERM_ERROR=
+fi
+
+LOG_LEVEL=2
+NAME=$(basename "${0}")
+COLOR_ENABLED=1
+colors
+
+log -d "Starting program: LOG_LEVEL=${LOG_LEVEL}"
+if [[ ${TERM_INPUT} ]]; then
+	log -d "INPUT: terminal"
+else
+	log -d "INPUT: NOT terminal"
+fi
+
+if [[ ${TERM_OUTPUT} ]]; then
+	log -d "OUTPUT: terminal"
+else
+	log -d "OUTPUT: NOT terminal"
+fi
+
+if [[ ${TERM_ERROR} ]]; then
+	log -d "ERROR: terminal"
+else
+	log -d "ERROR: NOT terminal"
+fi
+
+log -d "Initializing program configuration."
+# Project information
+VERSION=2025.1.0.1-beta
+GITHUB=https://github.com/jorexdeveloper
+REPOSITORY=jore
+AUTHOR=Jore
+log -d "NAME=${NAME}, VERSION=${VERSION}"
+
+# Program configuration
+SOURCE_DIR=~/.local/share/"${NAME}"
+GEMINI_API_KEY_FILE=~/.gemini.key
+
+SAVE_RESPONSE=1
+RESPONSE_DIR="${SOURCE_DIR}"/responses
+
+HISTORY_ENABLED=1
+HISTORY_FILE_ENABLED=1
+HISTORY_DIR="${SOURCE_DIR}"/history
+HISTORY_FILE="${SOURCE_DIR}"/chat.json
+
+HIGHLIGTER=bat
+HIGHLIGTER_ARGS=(--color="${HIGHLIGHTER_COLOR_STATUS}" --language=markdown)
+
+PAGER=less
+PAGER_ARGS=(--tabs=4 -RFX)
+
+# Prevent shell overrides
+GEMINI_API_KEY=
+SAVE_API_KEY=
+INTERACTIVE=
+PRINT_CHAT=
+NEW_CHAT=
+NEW_CHAT_NO_SAVE=
+MAIN_ACTION=
+CHAT_SEPARATOR=
+RAW_OUTPUT=
+RAW_INPUT=
+JSON_RESPONSE=
+QUIET=
+CLIPBOARD=
+USER_PROMPT=
+RETRY_CONN_ERROR=
+PRINT_CHAT_NO_FIRST_LINE=
+
+log -d "Initializing API configuration."
+# API configuration
+API_VERSION=v1beta
+API_METHOD=generateContent
+API_MODEL=models/gemini-2.5-flash
+API_URL=https://generativelanguage.googleapis.com
+
+# Process command line options
+log -i "Processing commandline arguments."
+while getopts ":Sm:icnNpdsrRjqQlL:xvh" opt; do
+	case "${opt}" in
+		S)
+			SAVE_API_KEY=1
+			;;
+		m)
+			API_MODEL=models/"${OPTARG#models/}"
+			;;
+		i)
+			INTERACTIVE=1
+			;;
+		c)
+			PRINT_CHAT=1
+			;;
+		n)
+			NEW_CHAT=1
+			;;
+		N)
+			NEW_CHAT_NO_SAVE=1
+			;;
+		p)
+			HISTORY_FILE_ENABLED=
+			SAVE_RESPONSE=
+			;;
+		d)
+			HISTORY_ENABLED=
+			;;
+		s)
+			CHAT_SEPARATOR=1
+			;;
+		r)
+			RAW_OUTPUT=1
+			;;
+		R)
+			RAW_INPUT=1
+			;;
+		j)
+			JSON_RESPONSE=1
+			RAW_OUTPUT=1
+			;;
+		q)
+			QUIET=1
+			;;
+		Q)
+			RAW_OUTPUT=1
+			QUIET=1
+			;;
+		l)
+			if [[ ${MAIN_ACTION} == LIST_MODELS ]]; then
+				MAIN_ACTION=LIST_MODELS_WITH_LIST
+			else
+				MAIN_ACTION=LIST_MODELS
+			fi
+			;;
+		L)
+			if [[ ${OPTARG} =~ ^[0-5]$ ]]; then
+				LOG_LEVEL=${OPTARG}
+			else
+				echo "Log level MUST be an integer from 0 to 5." >&2
+				exit 2
+			fi
+			;;
+		x)
+			RETRY_CONN_ERROR=1
+			;;
+		v)
+			print_version
+			exit
+			;;
+		h)
+			print_help
+			exit
+			;;
+		:)
+			echo "Option '-${OPTARG}' requires an argument." >&2
+			exit 2
+			;;
+		*)
+			echo "Unknown option '-${OPTARG}'. Did you forget to add '--'?" >&2
+			exit 2
+			;;
+	esac
+done
+shift $((OPTIND - 1))
+unset OPTIND
+log -d "Processed all commandline arguments."
+
+# Check for dependencies
+log -i "Checking for dependencies."
+for cmd in curl fmt jq "${HIGHLIGTER}" "${PAGER}"; do
+	if ! command -v "${cmd}" &>/dev/null; then
+		log -c "${cmd} is required but not installed."
+	fi
+done
+
+# Check for API key
+log -i "Checking for API key."
+if [[ ! ${GEMINI_API_KEY} ]]; then
+	if [[ -r ${GEMINI_API_KEY_FILE} ]]; then
+		log -d "Reading API key from file: ${GEMINI_API_KEY_FILE}"
+		GEMINI_API_KEY=$(cat "${GEMINI_API_KEY_FILE}")
+	fi
+
+	if [[ ! ${GEMINI_API_KEY} ]]; then
+		log -c "API key not set. Please set and export the GEMINI_API_KEY environment variable."
+	fi
+fi
+
+# Save API key
+if [[ ${SAVE_API_KEY} ]]; then
+	log -i "Saving API key."
+	if printf %s "${GEMINI_API_KEY}" >"${GEMINI_API_KEY_FILE}"; then
+		log -d "API key saved to file: ${GEMINI_API_KEY_FILE}"
+	else
+		log -e "Failed to save API key to file: ${GEMINI_API_KEY_FILE}"
+	fi
+fi
+
+# Process optional actions
+if [[ ${MAIN_ACTION} ]]; then
+	log -i "Processing main action."
+	case "${MAIN_ACTION}" in
+		LIST_MODELS | LIST_MODELS_WITH_LIST) list_models ;;
+		*) log -c "Unsupported action: ${MAIN_ACTION}" ;;
+	esac
+	exit
+fi
+
+# Check user prompt
+log -i "Checking for user prompt."
+if [[ ${*} ]]; then
+	USER_PROMPT="${*}"
+else
+	if [[ ! ${TERM_INPUT} ]]; then
+		log -d "Reading user prompt from INPUT."
+		read -r -d "" USER_PROMPT
+		if [[ ! ${USER_PROMPT} ]]; then
+			log -c "Received empty input from stdin."
+		fi
+		INTERACTIVE=
+	else
+		INTERACTIVE=1
+	fi
+fi
+
+# Initialize chat history
+if [[ ${HISTORY_ENABLED} ]]; then
+	if [[ ${HISTORY_FILE_ENABLED} ]]; then
+		HIST_TEMP_FILE=${HISTORY_FILE}.tmp
+		log -d "Temp file created: ${HIST_TEMP_FILE}"
+	fi
+
+	if [[ ${NEW_CHAT} || ${NEW_CHAT_NO_SAVE} ]]; then
+		if [[ ${NEW_CHAT_NO_SAVE} ]]; then
+			create_new_chat -w
+		else
+			create_new_chat -wb
+		fi
+	else
+		init_history -f
+	fi
+fi
+
+# Prevent logs from interfering with output
+if [[ ${TERM_OUTPUT} && ${TERM_ERROR} ]]; then
+	if TMP_LOG=$(mktemp) &&
+		exec 2>"${TMP_LOG}"; then
+		log -i "Temporarily redirecting logs."
+		log -d "Temporarily redirecting logs to file: ${TMP_LOG}"
+		trap 'cat "${TMP_LOG}"; rm -f -- "${TMP_LOG}"' EXIT
+		trap 'exit' INT TERM
+	else
+		log -e "Failed to temporarily redirect logs to file: ${TMP_LOG}"
+	fi
+fi
+
+# Main program logic
+if [[ ${INTERACTIVE} ]]; then
+	log -i "Starting non-interactive mode."
+	header
+
+	if [[ ${PRINT_CHAT} ]]; then
+		print_chat "${CHAT_HISTORY}"
+	fi
+
+	if ! [[ ${QUIET} || ${RAW_OUTPUT} || ${PRINT_CHAT} ]]; then
+		if [[ ${CHAT_SEPARATOR} ]]; then
+			msg -S "Type '/help' for more information."
+		else
+			msg "Type '/help' for more information."
+		fi
+	fi
+
+	if ! [[ ${QUIET} || ${USER_PROMPT} || ${PRINT_CHAT} ]]; then
+		msg -ml "Hi, can I assist you?"
+	fi
+
+	while true; do
+		if [[ ! ${USER_PROMPT} ]]; then
+			if [[ ${TERM_OUTPUT} ]]; then
+				msg -uln
+			fi
+
+			read -r USER_PROMPT || READ_EOF=1
+
+			if [[ ${READ_EOF} ]]; then
+				if [[ ${TERM_OUTPUT} && ! ${RAW_OUTPUT} ]]; then
+					printf \\n
+				fi
+				break
+			fi
+
+			if ! [[ ${TERM_OUTPUT} || ${READ_EOF} ]]; then
+				msg -ul -- "${USER_PROMPT}"
+			fi
+		else
+			msg -ul -- "${USER_PROMPT}"
+		fi
+
+		if [[ ! ${LAST_PROMPT} && ${HISTORY_ENABLED} ]]; then
+			LAST_PROMPT=$(
+				jq \
+					-nr \
+					--argjson CHAT_HISTORY "${CHAT_HISTORY}" \
+					'$CHAT_HISTORY | map(select(contains({role: "user"})))[-1].parts[0].text // empty'
+			)
+		fi
+
+		if [[ ! ${LAST_RESPONSE} && ${HISTORY_ENABLED} ]]; then
+			LAST_RESPONSE=$(
+				jq \
+					-nr \
+					--argjson CHAT_HISTORY "${CHAT_HISTORY}" \
+					'$CHAT_HISTORY | map(select(contains({role: "model"})))[-1].parts[0].text // empty'
+			)
+		fi
+
+		if [[ ! ${RAW_INPUT} ]]; then
+			case "${USER_PROMPT,,}" in
+				"") continue ;;
+				q | quit | exit)
+					break
+					;;
+				/*)
+					case "${USER_PROMPT,,}" in
+						/q | /quit | /exit)
+							break
+							;;
+						/k*)
+							USER_PROMPT=${USER_PROMPT#/k }
+							GEMINI_API_KEY=${USER_PROMPT#/key }
+							msg -l "New API key set."
+							USER_PROMPT=
+							continue
+							;;
+						/m*)
+							USER_PROMPT=${USER_PROMPT#/m }
+							USER_PROMPT=${USER_PROMPT#/model }
+							API_MODEL=${USER_PROMPT/models\//}
+							msg -l "Switched API model to: ${API_MODEL}"
+							USER_PROMPT=
+							continue
+							;;
+						/r | /raw)
+							if [[ ${RAW_OUTPUT} ]]; then
+								RAW_OUTPUT=
+								msg -l "Raw output disabled."
+							else
+								RAW_OUTPUT=1
+								msg -l "Raw output enabled."
+							fi
+							USER_PROMPT=
+							continue
+							;;
+						/d | /disable)
+							RAW_INPUT=1
+							msg -l "All commands disabled. Use Ctrl-D to exit."
+							USER_PROMPT=
+							continue
+							;;
+						/p | /private)
+							if [[ ${HISTORY_FILE_ENABLED} || ${SAVE_RESPONSE} ]]; then
+								HISTORY_FILE_ENABLED=
+								SAVE_RESPONSE=
+								msg -l "Private chat disabled."
+							else
+								HISTORY_FILE_ENABLED=1
+								SAVE_RESPONSE=1
+								msg -l "Private chat enabled."
+							fi
+							USER_PROMPT=
+							continue
+							;;
+						/s | /sep)
+							if [[ ${CHAT_SEPARATOR} ]]; then
+								CHAT_SEPARATOR=
+								msg -l "Chat separator disabled."
+							else
+								CHAT_SEPARATOR=1
+								msg -l "Chat separator enabled."
+							fi
+							USER_PROMPT=
+							continue
+							;;
+						/re)
+							if [[ ${LAST_PROMPT} ]]; then
+								USER_PROMPT=${LAST_PROMPT}
+							else
+								USER_PROMPT=
+								msg -l "Last prompt is empty."
+							fi
+							continue
+							;;
+						/cb)
+							if clipboard; then
+								if [[ ${CLIPBOARD} ]]; then
+									USER_PROMPT=${CLIPBOARD}
+								else
+									USER_PROMPT=
+									msg -l "Clipboard is empty."
+								fi
+							else
+								msg -l "Failed to get clipboard contents."
+								USER_PROMPT=
+							fi
+							continue
+							;;
+						/cp)
+							if [[ ${LAST_RESPONSE} ]]; then
+								if clipboard "${LAST_RESPONSE}"; then
+									msg -l "Last response copied to clipboard."
+								else
+									msg -l "Failed to copy last response to clipboard."
+								fi
+							else
+								msg -l "Last response is empty."
+							fi
+							USER_PROMPT=
+							continue
+							;;
+						/clear)
+							create_new_chat -w
+							response_code=${?}
+							if [[ ${response_code} -eq 0 ]]; then
+								msg -l "Chat cleared."
+							else
+								msg -lE "Failed to clear chat."
+							fi
+							USER_PROMPT=
+							continue
+							;;
+						/n | /new)
+							create_new_chat -wb
+							response_code=${?}
+							if [[ ${response_code} -eq 0 ]]; then
+								msg -l "New chat created."
+							else
+								msg -lE "Failed to create new chat."
+							fi
+							USER_PROMPT=
+							continue
+							;;
+						/l | /list)
+							list_models
+							USER_PROMPT=
+							continue
+							;;
+						/x)
+							if [[ ${RETRY_CONN_ERROR} ]]; then
+								RETRY_CONN_ERROR=
+								msg -l "Retry on connection error disabled."
+							else
+								RETRY_CONN_ERROR=1
+								msg -l "Retry on connection error enabled. Use Ctrl+C to stop."
+							fi
+							USER_PROMPT=
+							continue
+							;;
+						/v | /version)
+							msg -l -- "${NAME} ${VERSION} (${API_MODEL/models\//})"
+							USER_PROMPT=
+							continue
+							;;
+						/h | /help)
+							msg -l "$(
+								cat <<-EOF
+									Type 'q', 'quit' or 'exit' to end session.
+
+									Other commands:
+									  /key STRING  Change the API key.
+									  /model NAME  Switch API model.
+									  /raw         Toggle raw output.
+									  /disable     Disable all commands.
+									  /private     Toggle private chat.
+									  /sep         Print chat separator.
+									  /re          Re-send last prompt.
+									  /cb          Send clipboard text as prompt.
+									  /cp          Copy response to clipboard.
+									  /clear       Clear current chat.
+									  /new         Start a new chat.
+									  /list        List supported API models.
+									  /x           Toggle retry on connection error.
+									  /version     Print version information.
+									  /help        Print help information.
+
+									  The first letter of a command can also be used if it's unique i.e '/h' for '/help' otherwise just type the entire command.
+								EOF
+							)"
+							USER_PROMPT=
+							continue
+							;;
+						*)
+							msg -l "Unknown command '${USER_PROMPT}'. Try /help for more information."
+							USER_PROMPT=
+							continue
+							;;
+					esac
+					;;
+				*) ;;
+			esac
+		fi
+
+		if ! [[ ${QUIET} || ${RAW_OUTPUT} ]] && [[ ${TERM_OUTPUT} ]]; then
+			printf '\e[?25l'
+			msg -mln "Thinking"
+			animation
+		else
+			msg
+		fi
+
+		if create_entry -u -- "${USER_PROMPT}"; then
+			USER_ENTRY=${CHAT_ENTRY}
+		else
+			log -c "Can't proceed without chat entry."
+		fi
+
+		if [[ ${HISTORY_ENABLED} ]]; then
+			get_response "${CHAT_HISTORY}" "${USER_ENTRY}"
+		else
+			get_response "${USER_ENTRY}"
+		fi
+		API_RESPONSE_CODE=${?}
+		log -d "API_RESPONSE_CODE=${API_RESPONSE_CODE}"
+
+		if [[ ${TERM_OUTPUT} ]]; then
+			animation -s
+			printf \\r
+		fi
+
+		if [[ ${API_RESPONSE_CODE} -eq 0 ]]; then
+			if [[ ${SAVE_RESPONSE} ]]; then
+				if [[ ${HISTORY_ENABLED} ]]; then
+					save_response "${CHAT_HISTORY}" "${USER_ENTRY}"
+				else
+					save_response "${USER_ENTRY}"
+				fi
+			fi
+
+			if [[ ${HISTORY_ENABLED} ]]; then
+				if create_entry -m -- "${API_MESSAGE}"; then
+					MODEL_ENTRY=${CHAT_ENTRY}
+					add_to_history -w "${USER_ENTRY}" "${MODEL_ENTRY}"
+				else
+					log -c "Can't proceed without chat entry."
+				fi
+			fi
+
+			print_response
+		else
+			if [[ ! ${TERM_OUTPUT} ]]; then
+				case "${API_RESPONSE_CODE}" in
+					3) api_error ;;
+					4) invalid_response ;;
+					*) log -e "${API_MESSAGE}" ;;
+				esac
+			fi
+
+			print_response -e
+		fi
+
+		LAST_PROMPT=${USER_PROMPT}
+		LAST_RESPONSE=${API_MESSAGE}
+		USER_PROMPT=
+
+		if [[ ${CHAT_SEPARATOR} ]]; then
+			print_usage_stats -lIs || msg -S
+		else
+			print_usage_stats -li
+		fi
+	done
+else
+	log -i "Starting non-interactive mode."
+
+	if ! [[ ${QUIET} || ${RAW_OUTPUT} ]] && [[ ${TERM_OUTPUT} ]]; then
+		printf '\e[?25l'
+		msg -mn "Thinking"
+		animation
+	fi
+
+	if create_entry -u -- "${USER_PROMPT}"; then
+		USER_ENTRY=${CHAT_ENTRY}
+	else
+		log -c "Can't proceed without chat entry."
+	fi
+
+	if [[ ${HISTORY_ENABLED} ]]; then
+		get_response "${CHAT_HISTORY}" "${USER_ENTRY}"
+	else
+		get_response "${USER_ENTRY}"
+	fi
+	API_RESPONSE_CODE=${?}
+	log -d "API_RESPONSE_CODE=${API_RESPONSE_CODE}"
+
+	if [[ ${TERM_OUTPUT} ]]; then
+		animation -s
+		printf \\r
+	fi
+
+	if [[ ${API_RESPONSE_CODE} -eq 0 ]]; then
+		if [[ ${SAVE_RESPONSE} ]]; then
+			if [[ ${HISTORY_ENABLED} ]]; then
+				save_response "${CHAT_HISTORY}" "${USER_ENTRY}"
+			else
+				save_response "${USER_ENTRY}"
+			fi
+		fi
+
+		if [[ ${HISTORY_ENABLED} ]]; then
+			if create_entry -m -- "${API_MESSAGE}"; then
+				MODEL_ENTRY=${CHAT_ENTRY}
+				add_to_history -w "${USER_ENTRY}" "${MODEL_ENTRY}"
+			else
+				log -c "Can't proceed without chat entry."
+			fi
+		fi
+
+		header -L
+
+		if [[ ${PRINT_CHAT} ]]; then
+			PRINT_CHAT_NO_FIRST_LINE=1 print_chat "${CHAT_HISTORY}"
+		else
+			print_response
+
+			if [[ ${CHAT_SEPARATOR} ]]; then
+				msg -S
+			fi
+		fi
+
+		if [[ ${CHAT_SEPARATOR} ]]; then
+			print_usage_stats -i
+		else
+			print_usage_stats -li
+		fi
+	else
+		case "${API_RESPONSE_CODE}" in
+			3) api_error ;;
+			4) invalid_response ;;
+			*) log -e "${API_MESSAGE}" ;;
+		esac
+	fi
+fi
+
+exit "${API_RESPONSE_CODE:-0}"
