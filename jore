@@ -794,7 +794,7 @@ msg() {
 		if [[ ${RAW_OUTPUT} ]]; then
 			printf %s\\n "${*}" | ${HIGHLIGTER} "${HIGHLIGTER_ARGS[@]}"
 		else
-			printf %s\\n "${*}" | fmt -sw "${size}" -g "${size}" | ${HIGHLIGTER} "${HIGHLIGTER_ARGS[@]}"
+			printf %s\\n "${*}" | ${HIGHLIGTER} "${HIGHLIGTER_ARGS[@]}" --wrap=character --terminal-width="${size}"
 		fi | sed "s/^/‌/" |
 			while read -r line; do
 				printf "${pref}${prompt_color}${prompt}${text_color}%s${R}" "${line}"
