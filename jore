@@ -141,10 +141,10 @@ create_new_chat() {
 
 		if [[ ${write_file} && ${HISTORY_FILE_ENABLED} && -f ${HISTORY_FILE} ]]; then
 			if [[ ${backup_current} ]]; then
-				local file="${HISTORY_DIR}"/chat-"$(date +'%Y%m%d%H%M%S')".json
+				local file=${HISTORY_DIR}/$(date +"${SAVE_FILE_DATE_FORMAT}").json
 				log -df "${from}" "Backing up current history to file: ${file}"
 				if ! {
-					mkdir -p "${HISTORY_DIR}" &&
+					mkdir -p "$(dirname "${file}")" &&
 						mv -f "${HISTORY_FILE}" "${file}"
 				}; then
 					log -e "Failed to backup current history to file: ${file}"
@@ -383,11 +383,10 @@ invalid_response() {
 	local from=invalid_response
 	log -e "${API_MESSAGE}"
 
-	local dir="${SOURCE_DIR}"/invalid_responses
-	local file="${dir}/response-$(date +'%Y%m%d%H%M%S').json"
+	local file=${SOURCE_DIR}/invalid_responses/$(date +"${SAVE_FILE_DATE_FORMAT}").json
 	log -df "${from}" "Saving invalid API response to file: ${file}"
 	if ! {
-		mkdir -p "${dir}" &&
+		mkdir -p "$(dirname "${file}")" &&
 			printf %s "${API_RESPONSE}" >"${file}"
 	}; then
 		log -e "Failed to save invalid API response to file: ${file}."
@@ -408,10 +407,10 @@ save_response() {
 	local from=save_response
 	if [[ ${SAVE_RESPONSE} ]]; then
 		log -i "Saving API response."
-		local file="${RESPONSE_DIR}/response-$(date +'%Y%m%d%H%M%S').json"
+		local file=${RESPONSE_DIR}/$(date +"${SAVE_FILE_DATE_FORMAT}").json
 		log -df "${from}" "Saving API response to file: ${file}"
 		if ! {
-			mkdir -p "${RESPONSE_DIR}" &&
+			mkdir -p "$(dirname "${file}")" &&
 				jq \
 					-nc \
 					--argjson response "${API_RESPONSE}" \
@@ -1401,6 +1400,7 @@ GEMINI_API_KEY_FILE=~/.gemini.key
 
 SAVE_RESPONSE=1
 RESPONSE_DIR="${SOURCE_DIR}"/responses
+SAVE_FILE_DATE_FORMAT="%Y.%m.%d/%H.%M.%S.%3N"
 
 HISTORY_ENABLED=1
 HISTORY_FILE_ENABLED=1
