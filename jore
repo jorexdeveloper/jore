@@ -1634,7 +1634,7 @@ if [[ ${INTERACTIVE} ]]; then
 	fi
 
 	if ! [[ ${QUIET} || ${USER_PROMPT} || ${PRINT_CHAT} ]]; then
-		msg -ml "Hi, can I assist you?"
+		msg -ml "Hi, how can I assist you?"
 	fi
 
 	while true; do
